@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SQL Playground — Real-World SQL &amp; Visualizer</title>
+  <meta name="description" content="Write real SQL (sql.js/SQLite) in the browser, visualize your schema &amp; live data, and simulate a Node.js/Python backend inserting rows." />
+
+  <!-- ============================================================
+       CDN dependencies (loaded with graceful fallbacks in script.js)
+         1) lucide     — icon set (UI polish, degrades gracefully)
+         2) sql.js     — real SQLite compiled to WebAssembly, runs SQL 100%
+                         in the browser. script.js probes several CDNs
+                         (jsDelivr / unpkg / cdnjs) and picks the first
+                         reachable one so the app works from file:// too.
+       ============================================================ -->
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin />
+  <link rel="preconnect" href="https://unpkg.com" crossorigin />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <!-- ════════════════════════ BOOT OVERLAY ════════════════════════
+       Covers the app while the sql.js engine (WebAssembly ~1 MB) is
+       fetched from a CDN. Swapped to an error state if no CDN is
+       reachable, with a Retry button. -->
+  <div id="bootOverlay">
+    <div class="boot-card">
+      <div class="boot-logo" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+          <ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>
+          <path d="M3 5v14a9 3 0 0 0 18 0V5"></path>
+          <path d="M3 12a9 3 0 0 0 18 0"></path>
+        </svg>
+      </div>
+      <h1>SQL Playground</h1>
+      <p class="boot-sub">Real SQLite (sql.js · WebAssembly) running in your browser</p>
+      <div class="boot-status-row">
+        <span class="boot-spinner" id="bootSpinner" aria-hidden="true"></span>
+        <span id="bootStatus">Waking up the SQL engine…</span>
+      </div>
+      <button id="bootRetry" class="btn primary" hidden>Retry connection</button>
+      <p class="boot-note" id="bootNote" hidden>
+        Couldn't reach a CDN from this page. The engine file <code>sql-wasm.wasm</code> must be
+        loaded once from the network (jsDelivr / unpkg / cdnjs) — check your connection and retry.
+      </p>
+    </div>
+  </div>
+
+  <!-- ════════════════════════ APP SHELL ════════════════════════ -->
+  <div id="app" hidden>
+
+    <!-- ── Top bar: brand · engine stats · global actions ─────────── -->
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>
+            <path d="M3 5v14a9 3 0 0 0 18 0V5"></path>
+            <path d="M3 12a9 3 0 0 0 18 0"></path>
+          </svg>
+        </span>
+        <div class="brand-text">
+          <h1>SQL Playground</h1>
+          <span>real in-browser SQLite · schema &amp; data visualizer · backend simulator</span>
+        </div>
+      </div>
+
+      <div class="stat-chips" role="status" aria-live="polite">
+        <span class="chip chip-engine" title="Browser SQL engine status">
+          <span class="dot dot-loading" id="engineDot"></span>
+          <span id="engineStateText">engine loading…</span>
+        </span>
+        <span class="chip" title="Tables in the current database">
+          <i data-lucide="table-2" class="ic"></i>
+          <b id="statTables">0</b> tables
+        </span>
+        <span class="chip" title="Total rows currently stored">
+          <i data-lucide="rows-3" class="ic"></i>
+          <b id="statRows">0</b> rows
+        </span>
+      </div>
+
+      <div class="top-actions">
+        <button id="btnSeedDemo" class="btn ghost small" title="Reset the DB and load a ready-made users + posts schema with sample data">
+          <i data-lucide="sparkles" class="ic"></i> Load demo DB
+        </button>
+        <button id="btnResetDb" class="btn ghost small danger" title="Click once to arm, click again to wipe every table &amp; row">
+          <i data-lucide="rotate-ccw" class="ic"></i> Reset DB
+        </button>
+      </div>
+    </header>
+
+    <!-- ── Three-column IDE workspace ────────────────────────────────
+         grid-template-areas:
+           "left  center  right"
+         Left   : guided tutorial + backend connection code playground
+         Center : live SQL terminal (top) + query output / console (bottom)
+         Right  : real-time visualizer (Schema ER ⇄ Live Data)          -->
+    <div id="workspace">
+
+      <!-- ═══════════════════ LEFT: tutorial + backend ═══════════════════ -->
+      <aside class="col-left" aria-label="Tutorial and backend playground">
+
+        <!-- Guided interactive tutorial -->
+        <section class="block tut-block" id="tutorialSection">
+          <header class="block-head">
+            <i data-lucide="list-checks" class="ic accent-blue"></i>
+            <h2>Guided Tutorial</h2>
+            <span class="progress-badge"><b id="progressDone">0</b>/<span id="progressTotal">4</span></span>
+          </header>
+          <div class="progress-track" aria-hidden="true"><div class="progress-fill" id="progressBar"></div></div>
+          <!-- Task cards are generated by script.js from the TASKS module -->
+          <div class="task-list" id="taskList"></div>
+        </section>
+
+        <!-- "Connect to DB" backend code playground -->
+        <section class="block grow-block code-block" id="backendSection">
+          <header class="block-head collapse-head" data-collapse-target="backendBody">
+            <i data-lucide="plug" class="ic accent-green"></i>
+            <h2>Backend Connection</h2>
+            <i data-lucide="chevron-down" class="ic collapse-arrow"></i>
+          </header>
+
+          <div class="collapse-body" id="backendBody">
+            <!-- language picker -->
+            <div class="lang-tabs" id="langTabs" role="tablist" aria-label="Backend language">
+              <button class="seg-btn active" data-lang="node" role="tab" aria-selected="true">
+                <i data-lucide="terminal" class="ic"></i> Node.js · mysql2
+              </button>
+              <button class="seg-btn" data-lang="py-sqlite" role="tab" aria-selected="false">
+                <i data-lucide="file-code-2" class="ic"></i> Python · sqlite3
+              </button>
+              <button class="seg-btn" data-lang="py-mysql" role="tab" aria-selected="false">
+                <i data-lucide="file-code-2" class="ic"></i> Python · mysql-connector
+              </button>
+            </div>
+
+            <!-- pretend connection config (mirrors the visible boilerplate) -->
+            <div class="conn-chips" aria-label="Example connection configuration">
+              <span class="chip small"><i data-lucide="database" class="ic"></i><span id="connHost">db.internal.example.com</span></span>
+              <span class="chip small"><i data-lucide="user" class="ic"></i><span id="connUser">app_user</span></span>
+              <span class="chip small"><i data-lucide="lock" class="ic"></i><span id="connDb">social_app</span></span>
+            </div>
+
+            <!-- layered syntax-highlighted code reader -->
+            <div class="codeframe" id="backendFrame">
+              <div class="hl-layer" aria-hidden="true"><pre id="backendPre" class="hl-pre"></pre></div>
+              <textarea id="backendArea" class="codearea readonly" readonly spellcheck="false"
+                        aria-label="Backend boilerplate code (read-only)"></textarea>
+            </div>
+
+            <!-- simulate-the-script controls -->
+            <div class="run-row">
+              <button id="btnRunScript" class="btn primary grow">
+                <i data-lucide="play" class="ic"></i> Run App Script
+              </button>
+              <button id="btnStopScript" class="btn danger grow" hidden>
+                <i data-lucide="square" class="ic"></i> Stop
+              </button>
+            </div>
+            <p class="hint-text" id="scriptStatus">
+              Simulates the script above against the real engine — watch the visualizer fill up live.
+            </p>
+          </div>
+        </section>
+      </aside>
+
+      <!-- ═══════════════════ CENTER: SQL terminal + output ═══════════════════ -->
+      <main class="col-center" aria-label="SQL terminal">
+
+        <!-- Live SQL terminal -->
+        <section class="block terminal-block" id="terminalSection">
+          <header class="block-head">
+            <i data-lucide="terminal" class="ic accent-cyan"></i>
+            <h2>SQL Terminal</h2>
+            <span class="head-tags">
+              <span class="chip small mono" title="The engine executes standard SQLite SQL">
+                <i data-lucide="zap" class="ic"></i> SQLite · sql.js
+              </span>
+            </span>
+          </header>
+
+          <!-- layered syntax-highlighted SQL editor (plain textarea on top,
+               highlighted <pre> underneath — see style.css / script.js) -->
+          <div class="codeframe sql-frame" id="sqlFrame">
+            <div class="hl-layer" aria-hidden="true"><pre id="sqlPre" class="hl-pre"></pre></div>
+            <textarea id="sqlEditor" class="codearea" spellcheck="false" autocapitalize="off"
+                      autocomplete="off" autocorrect="off"
+                      placeholder="Write any SQL — CREATE TABLE, INSERT, UPDATE, DELETE, SELECT, JOINs…&#10;&#10;CREATE TABLE users (&#10;  id   INTEGER PRIMARY KEY AUTOINCREMENT,&#10;  name TEXT NOT NULL,&#10;  age  INTEGER&#10;);&#10;&#10;Then press Ctrl + Enter to run it."
+                      aria-label="SQL editor — write and run SQL statements"></textarea>
+          </div>
+
+          <footer class="term-footer">
+            <span class="status-text" id="sqlStatus">Ready — Ctrl+Enter to run</span>
+            <span class="footer-actions">
+              <button id="btnClearSql" class="btn ghost small" title="Clear the editor">
+                <i data-lucide="eraser" class="ic"></i> Clear
+              </button>
+              <button id="btnRunSql" class="btn primary" title="Run SQL (Ctrl + Enter)">
+                <i data-lucide="play" class="ic"></i> Run SQL
+              </button>
+            </span>
+          </footer>
+        </section>
+
+        <!-- Output: query results grid + engine activity + backend console -->
+        <section class="block output-block" id="outputSection">
+          <header class="block-head output-tabs">
+            <div class="tabbar" id="consoleTabs" role="tablist" aria-label="Output console tabs">
+              <button class="seg-btn tab active" data-tab="results" role="tab" aria-selected="true">
+                <i data-lucide="table-2" class="ic"></i> Query Results
+              </button>
+              <button class="seg-btn tab" data-tab="activity" role="tab" aria-selected="false">
+                <i data-lucide="activity" class="ic"></i> Engine Activity
+              </button>
+              <button class="seg-btn tab" data-tab="backend" role="tab" aria-selected="false">
+                <i data-lucide="terminal" class="ic"></i> Backend Console
+              </button>
+            </div>
+            <span class="head-tags"><span class="chip small" id="outcomeChip">no output yet</span></span>
+          </header>
+
+          <!-- Query result banner (errors &amp; execution summaries) -->
+          <div class="banner" id="resultBanner" hidden>
+            <i data-lucide="circle-check" class="ic banner-ic" id="bannerIcon"></i>
+            <span id="resultBannerText"></span>
+            <button class="iconbtn subtle" id="resultBannerClose" title="Dismiss" aria-label="Dismiss">
+              <i data-lucide="x" class="ic"></i>
+            </button>
+          </div>
+
+          <!-- Tab 1 · spreadsheet-like query results -->
+          <div class="tab-panel" id="panelResults">
+            <div class="results-scroll" id="resultViews" aria-live="polite">
+              <div class="empty-state" id="resultsEmpty">
+                <i data-lucide="table-2" class="ic big"></i>
+                <p>Run a <code>SELECT</code> to see its result grid here.<br>
+                   Every DDL / DML statement is logged under <b>Engine Activity</b>.</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Tab 2 · engine activity feed -->
+          <div class="tab-panel" id="panelActivity" hidden>
+            <ol class="log-list" id="activityList" aria-live="polite"></ol>
+            <div class="empty-state" id="activityEmpty">
+              <i data-lucide="activity" class="ic big"></i>
+              <p>Every statement you run will be logged here with its real outcome.</p>
+            </div>
+          </div>
+
+          <!-- Tab 3 · simulated backend console -->
+          <div class="tab-panel" id="panelBackend" hidden>
+            <div class="log-list log-console" id="backendLog" aria-live="polite"></div>
+            <div class="empty-state" id="backendEmpty">
+              <i data-lucide="terminal" class="ic big"></i>
+              <p>Press <b>Run App Script</b> in the left panel to simulate a real backend<br>
+                 connecting, reading the schema and inserting rows one by one.</p>
+            </div>
+          </div>
+        </section>
+      </main>
+
+      <!-- ═══════════════════ RIGHT: real-time visualizer ═══════════════════ -->
+      <aside class="col-right" aria-label="Database visualizer">
+
+        <!-- header + mode toggle + zoom controls -->
+        <section class="block viz-block" id="vizSection">
+          <header class="block-head viz-head">
+            <i data-lucide="database" class="ic accent-violet"></i>
+            <h2>Database Visualizer</h2>
+            <div class="viz-tabs" id="vizTabs" role="tablist" aria-label="Visualizer mode">
+              <button class="seg-btn active" data-viz="schema" role="tab" aria-selected="true">Schema ER</button>
+              <button class="seg-btn" data-viz="data" role="tab" aria-selected="false">Live Data</button>
+            </div>
+          </header>
+
+          <!-- ── Schema / ER diagram mode ──────────────────────────── -->
+          <div class="tab-panel viz-panel" id="schemaPanel">
+            <div class="er-toolbar">
+              <span class="chip small mono er-count" id="erCount">0 tables</span>
+              <span class="viz-hint">drag tables · scroll / buttons to zoom · pan canvas</span>
+              <span class="er-zoom">
+                <button class="iconbtn" id="btnZoomOut" title="Zoom out" aria-label="Zoom out"><i data-lucide="zoom-out" class="ic"></i></button>
+                <b id="zoomPct">100%</b>
+                <button class="iconbtn" id="btnZoomIn" title="Zoom in" aria-label="Zoom in"><i data-lucide="zoom-in" class="ic"></i></button>
+                <button class="iconbtn" id="btnFit" title="Fit diagram in view" aria-label="Fit diagram"><i data-lucide="maximize" class="ic"></i></button>
+              </span>
+            </div>
+
+            <!-- pan / zoom world: html table-cards + an svg layer for the
+                 foreign-key edges share the same pixel coordinate space -->
+            <div class="er-viewport" id="erViewport">
+              <div class="er-world" id="erWorld">
+                <svg id="erSvg" aria-hidden="true">
+                  <defs>
+                    <marker id="fkArrow" viewBox="0 0 10 10" refX="9" refY="5"
+                            markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                      <path d="M 0 1 L 9 5 L 0 9 z" fill="#fb923c"></path>
+                    </marker>
+                  </defs>
+                  <g id="erEdgeLayer"></g>
+                </svg>
+                <div class="er-cards" id="erCards"></div>
+              </div>
+              <div class="empty-state er-empty" id="erEmpty">
+                <i data-lucide="database" class="ic big"></i>
+                <p>No tables yet.<br>Run a <code>CREATE TABLE</code> in the SQL terminal and it appears here instantly.</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- ── Live data mode ────────────────────────────────────── -->
+          <div class="tab-panel viz-panel" id="dataPanel" hidden>
+            <div class="data-toolbar">
+              <label class="searchbox" title="Filter tables and rows">
+                <i data-lucide="search" class="ic"></i>
+                <input id="dataFilter" type="text" placeholder="Filter tables / rows…" autocomplete="off" spellcheck="false" />
+              </label>
+              <span class="chip small mono" id="dataCountChip">0 rows</span>
+            </div>
+            <div class="data-list" id="dataList" aria-live="polite"></div>
+            <div class="empty-state" id="dataEmpty" hidden>
+              <i data-lucide="table-2" class="ic big"></i>
+              <p>No tables yet — the Live Data view renders one table block per table,<br>
+                 and flashes rows green as INSERT / UPDATE statements hit them.</p>
+            </div>
+          </div>
+        </section>
+      </aside>
+    </div>
+  </div>
+
+  <!-- fixed layers: toasts + confetti -->
+  <div id="toastHost" class="toast-host" aria-live="polite"></div>
+  <div id="confettiHost" class="confetti-host" aria-hidden="true"></div>
+
+  <noscript>
+    <p style="padding: 2rem; font-family: sans-serif; color: #f87171">
+      This playground needs JavaScript: it runs a real SQLite engine (sql.js) in your browser.
+    </p>
+  </noscript>
+
+  <!-- lucide icons (non-fatal: script.js retries alternate CDNs, then carries on) -->
+  <script src="https://cdn.jsdelivr.net/npm/lucide@0.469.0/dist/umd/lucide.min.js"></script>
+  <!-- the whole application (engine loading is handled inside script.js) -->
+  <script src="script.js"></script>
+</body>
+</html>
